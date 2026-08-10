@@ -73,6 +73,21 @@ export interface GitHubRepo {
    * string; the remaining fields are structured filters.
    */
   searchPullRequests(query: GitHubPullRequestSearch): Promise<Cursor<GitHubPullRequestSummary>>;
+
+  /** Gets the content of a file at a specific path. */
+  getFileContent(path: string, branch?: string): Promise<GitHubFileContent>;
+
+  /** Gets the directory listing at a specific path. */
+  getDirectory(path: string, branch?: string): Promise<GitHubDirectoryItem[]>;
+
+  /** Creates or updates a file. */
+  createOrUpdateFile(path: string, options: GitHubWriteFileOptions): Promise<void>;
+
+  /** Creates a new branch. */
+  createBranch(options: GitHubCreateBranchOptions): Promise<void>;
+
+  /** Gets the SHA of a specific branch (to use as base for createBranch). */
+  getBranch(branchName: string): Promise<{ ref: string; sha: string }>;
 }
 
 /** A single GitHub issue. */
@@ -479,4 +494,36 @@ export type GitHubPullRequestMergeOptions = {
   /** Expected HEAD SHA of the pull request. If provided, the merge will fail if the
    *  current HEAD doesn't match, preventing races with concurrent pushes. */
   expectedHeadSha?: string;
+}
+
+/** Represents a single file's content and metadata fetched from a repository. */
+export type GitHubFileContent = {
+  path: string;
+  sha: string;
+  size: number;
+  content: string; // Base64 encoded or raw string depending on API
+  encoding: string;
+}
+
+/** Represents an item in a directory listing. */
+export type GitHubDirectoryItem = {
+  name: string;
+  path: string;
+  sha: string;
+  size: number;
+  type: "file" | "dir" | "symlink" | "submodule";
+}
+
+/** Options for writing or creating a file. */
+export type GitHubWriteFileOptions = {
+  message: string;
+  content: string; // The text content to write
+  branch?: string;
+  sha?: string; // Required if updating an existing file
+}
+
+/** Options for creating a branch. */
+export type GitHubCreateBranchOptions = {
+  ref: string; // e.g., "refs/heads/new-branch-name"
+  sha: string; // the SHA of the commit to branch from
 }

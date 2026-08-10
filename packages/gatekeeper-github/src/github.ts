@@ -242,6 +242,17 @@ type MergePullRequestAction = BaseAction & {
   options?: GitHubPullRequestMergeOptions;
 };
 
+type CreateOrUpdateFileAction = BaseAction & {
+  type: "createOrUpdateFile";
+  path: string;
+  options: import("./types").GitHubWriteFileOptions;
+};
+
+type CreateBranchAction = BaseAction & {
+  type: "createBranch";
+  options: import("./types").GitHubCreateBranchOptions;
+};
+
 type GitHubAction =
   | CreateIssueAction
   | CreatePullRequestAction
@@ -253,7 +264,9 @@ type GitHubAction =
   | PostCommentAction
   | PostReviewAction
   | ReplyToDiffCommentAction
-  | MergePullRequestAction;
+  | MergePullRequestAction
+  | CreateOrUpdateFileAction
+  | CreateBranchAction;
 
 type StoredActionRecord = {
   action: GitHubAction;
@@ -1384,7 +1397,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     return this.ctx.exports.UserAccount.get(this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
   }
 
-  async #withApi<T>(fn: (api: GitHubApi) => Promise<T>): Promise<T> {
+  async withApi<T>(fn: (api: GitHubApi) => Promise<T>): Promise<T> {
     const account = this.#userAccount();
     const api = new GitHubApi(async () => await account.getAccessToken());
     try {
@@ -1396,6 +1409,10 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       }
       throw error;
     }
+  }
+
+  async #withApi<T>(fn: (api: GitHubApi) => Promise<T>): Promise<T> {
+    return this.withApi(fn);
   }
 
   #counterKey(name: string): string {
@@ -1965,6 +1982,9 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       case "replyToDiffComment":
       case "mergePullRequest":
         return kind === "pull" && action.pullId === provisionalId;
+      case "createOrUpdateFile":
+      case "createBranch":
+        return false;
     }
   }
 
@@ -2023,7 +2043,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
 
   #pendingActionsForEntity(kind: EntityKind, logicalId: string): GitHubAction[] {
     return this.#listPendingActions().filter(action => {
-      if (action.type === "createIssue" || action.type === "createPullRequest") {
+      if (action.type === "createIssue" || action.type === "createPullRequest" || action.type === "createOrUpdateFile" || action.type === "createBranch") {
         return false;
       }
 
@@ -3433,6 +3453,31 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         this.#clearCaches();
         return;
       }
+      case "createOrUpdateFile": {
+        await this.#withApi(api => api.createOrUpdateFile(
+          action.owner,
+          action.repo,
+          action.path,
+          action.options.message,
+          action.options.content,
+          action.options.branch,
+          action.options.sha,
+        ));
+        this.#markActionApproved(action);
+        this.#clearCaches();
+        return;
+      }
+      case "createBranch": {
+        await this.#withApi(api => api.createBranch(
+          action.owner,
+          action.repo,
+          action.options.ref,
+          action.options.sha,
+        ));
+        this.#markActionApproved(action);
+        this.#clearCaches();
+        return;
+      }
     }
   }
 
@@ -3556,6 +3601,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       case "createPullRequest":
       case "postReview":
       case "mergePullRequest":
+      case "createOrUpdateFile":
+      case "createBranch":
         return {
           message: "This GitHub action cannot be automatically reverted.",
           canRetry: false,
@@ -3611,6 +3658,29 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       owner: this.ctx.props.owner,
       repo: this.ctx.props.repo,
       provisionalId: this.#nextProvisionalResourceId(),
+      options,
+    };
+  }
+
+  async prepareCreateOrUpdateFile(path: string, options: import("./types").GitHubWriteFileOptions): Promise<CreateOrUpdateFileAction> {
+    return {
+      type: "createOrUpdateFile",
+      approvalId: this.#nextActionId(),
+      submittedAt: Date.now(),
+      owner: this.ctx.props.owner,
+      repo: this.ctx.props.repo,
+      path,
+      options,
+    };
+  }
+
+  async prepareCreateBranch(options: import("./types").GitHubCreateBranchOptions): Promise<CreateBranchAction> {
+    return {
+      type: "createBranch",
+      approvalId: this.#nextActionId(),
+      submittedAt: Date.now(),
+      owner: this.ctx.props.owner,
+      repo: this.ctx.props.repo,
       options,
     };
   }
@@ -3882,6 +3952,49 @@ class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSession {
       description: `Search pull requests in the GitHub repository for "${query.text}".`,
     });
     return this.#gatekeeper.searchPullRequests(query, query.resultsPerPage ?? 50);
+  }
+
+  async getFileContent(path: string, branch?: string): Promise<import("./types").GitHubFileContent> {
+    await this.#approvalQueue.authorizeObservation({
+      title: `Read file content ${path}`,
+      description: `Read the content of file ${path} from the GitHub repository.`,
+    });
+    // Cast any to bypass TS complaining about private methods.
+    return (this.#gatekeeper as any).withApi((api: GitHubApi) => api.getFileContent((this.#gatekeeper as any).ctx.props.owner, (this.#gatekeeper as any).ctx.props.repo, path, branch));
+  }
+
+  async getDirectory(path: string, branch?: string): Promise<import("./types").GitHubDirectoryItem[]> {
+    await this.#approvalQueue.authorizeObservation({
+      title: `Read directory ${path}`,
+      description: `Read the content of directory ${path} from the GitHub repository.`,
+    });
+    return (this.#gatekeeper as any).withApi((api: GitHubApi) => api.getDirectory((this.#gatekeeper as any).ctx.props.owner, (this.#gatekeeper as any).ctx.props.repo, path, branch));
+  }
+
+  async createOrUpdateFile(path: string, options: import("./types").GitHubWriteFileOptions): Promise<void> {
+    const action = await this.#gatekeeper.prepareCreateOrUpdateFile(path, options);
+    await this.#gatekeeper.submitActionForApproval(this.#approvalQueue, action, {
+      title: `Create or Update file ${path}`,
+      description: `Create or Update file ${path} in the GitHub repository.`,
+      implementsRevert: false,
+    });
+  }
+
+  async createBranch(options: import("./types").GitHubCreateBranchOptions): Promise<void> {
+    const action = await this.#gatekeeper.prepareCreateBranch(options);
+    await this.#gatekeeper.submitActionForApproval(this.#approvalQueue, action, {
+      title: `Create branch ${options.ref}`,
+      description: `Create branch ${options.ref} from ${options.sha} in the GitHub repository.`,
+      implementsRevert: false,
+    });
+  }
+
+  async getBranch(branchName: string): Promise<{ ref: string; sha: string }> {
+    await this.#approvalQueue.authorizeObservation({
+      title: `Read branch ${branchName}`,
+      description: `Read information about branch ${branchName} from the GitHub repository.`,
+    });
+    return (this.#gatekeeper as any).withApi((api: GitHubApi) => api.getBranch((this.#gatekeeper as any).ctx.props.owner, (this.#gatekeeper as any).ctx.props.repo, branchName));
   }
 }
 
