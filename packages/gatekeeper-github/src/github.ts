@@ -242,6 +242,29 @@ type MergePullRequestAction = BaseAction & {
   options?: GitHubPullRequestMergeOptions;
 };
 
+type CreateBranchAction = BaseAction & {
+  type: "createBranch";
+  branchName: string;
+  sha: string;
+};
+
+type WriteFileAction = BaseAction & {
+  type: "writeFile";
+  path: string;
+  message: string;
+  content: string;
+  branch?: string;
+  sha?: string;
+};
+
+type DeleteFileAction = BaseAction & {
+  type: "deleteFile";
+  path: string;
+  message: string;
+  sha: string;
+  branch?: string;
+};
+
 type GitHubAction =
   | CreateIssueAction
   | CreatePullRequestAction
@@ -253,7 +276,10 @@ type GitHubAction =
   | PostCommentAction
   | PostReviewAction
   | ReplyToDiffCommentAction
-  | MergePullRequestAction;
+  | MergePullRequestAction
+  | CreateBranchAction
+  | WriteFileAction
+  | DeleteFileAction;
 
 type StoredActionRecord = {
   action: GitHubAction;
@@ -3433,6 +3459,39 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         this.#clearCaches();
         return;
       }
+      case "createBranch": {
+        await this.#withApi(api => api.createRef(action.owner, action.repo, `refs/heads/${action.branchName}`, action.sha));
+        this.#markActionApproved(action);
+        this.#clearCaches();
+        return;
+      }
+      case "writeFile": {
+        await this.#withApi(api => api.createOrUpdateFile(
+          action.owner,
+          action.repo,
+          action.path,
+          action.message,
+          action.content,
+          action.branch,
+          action.sha,
+        ));
+        this.#markActionApproved(action);
+        this.#clearCaches();
+        return;
+      }
+      case "deleteFile": {
+        await this.#withApi(api => api.deleteFile(
+          action.owner,
+          action.repo,
+          action.path,
+          action.message,
+          action.sha,
+          action.branch,
+        ));
+        this.#markActionApproved(action);
+        this.#clearCaches();
+        return;
+      }
     }
   }
 
@@ -3556,6 +3615,9 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       case "createPullRequest":
       case "postReview":
       case "mergePullRequest":
+      case "createBranch":
+      case "writeFile":
+      case "deleteFile":
         return {
           message: "This GitHub action cannot be automatically reverted.",
           canRetry: false,
@@ -3603,6 +3665,38 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     return this.#searchPullSummaries(query, pageSize);
   }
 
+  async listBranches(pageSize: number): Promise<Cursor<import("./types").GitHubBranch>> {
+    return new StreamingCursor(pageSize, async (page, perPage) => {
+      const branches = await this.#withApi(api => api.listBranches(this.ctx.props.owner, this.ctx.props.repo, perPage, page));
+      return branches.map(b => ({
+        name: b.name,
+        sha: b.commit.sha,
+        url: b.commit.url,
+      }));
+    });
+  }
+
+  async getBranch(name: string): Promise<import("./types").GitHubBranch> {
+    const branch = await this.#withApi(api => api.getBranch(this.ctx.props.owner, this.ctx.props.repo, name));
+    return {
+      name: branch.name,
+      sha: branch.commit.sha,
+      url: branch.commit.url,
+    };
+  }
+
+  async readFile(path: string, ref?: string): Promise<import("./types").GitHubFileContent> {
+    const content = await this.#withApi(api => api.getContent(this.ctx.props.owner, this.ctx.props.repo, path, ref));
+    if (content.type !== "file") {
+      throw new Error(`Path ${path} is not a file (type: ${content.type}).`);
+    }
+    return {
+      path: content.path,
+      sha: content.sha,
+      contentBase64: content.content || "",
+    };
+  }
+
   async prepareCreateIssue(options: GitHubCreateIssueOptions): Promise<CreateIssueAction> {
     return {
       type: "createIssue",
@@ -3624,6 +3718,47 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       repo: this.ctx.props.repo,
       provisionalId: this.#nextProvisionalResourceId(),
       options,
+    };
+  }
+
+  async prepareCreateBranch(branchName: string, sha: string): Promise<CreateBranchAction> {
+    return {
+      type: "createBranch",
+      approvalId: this.#nextActionId(),
+      submittedAt: Date.now(),
+      owner: this.ctx.props.owner,
+      repo: this.ctx.props.repo,
+      branchName,
+      sha,
+    };
+  }
+
+  async prepareWriteFile(options: import("./types").GitHubWriteFileOptions): Promise<WriteFileAction> {
+    return {
+      type: "writeFile",
+      approvalId: this.#nextActionId(),
+      submittedAt: Date.now(),
+      owner: this.ctx.props.owner,
+      repo: this.ctx.props.repo,
+      path: options.path,
+      message: options.message,
+      content: options.contentBase64 ?? btoa(unescape(encodeURIComponent(options.content ?? ""))),
+      branch: options.branch,
+      sha: options.sha,
+    };
+  }
+
+  async prepareDeleteFile(options: import("./types").GitHubDeleteFileOptions): Promise<DeleteFileAction> {
+    return {
+      type: "deleteFile",
+      approvalId: this.#nextActionId(),
+      submittedAt: Date.now(),
+      owner: this.ctx.props.owner,
+      repo: this.ctx.props.repo,
+      path: options.path,
+      message: options.message,
+      sha: options.sha,
+      branch: options.branch,
     };
   }
 
@@ -3882,6 +4017,60 @@ class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSession {
       description: `Search pull requests in the GitHub repository for "${query.text}".`,
     });
     return this.#gatekeeper.searchPullRequests(query, query.resultsPerPage ?? 50);
+  }
+
+  async listBranches(options?: GitHubPageOptions): Promise<Cursor<import("./types").GitHubBranch>> {
+    await this.#approvalQueue.authorizeObservation({
+      title: `List branches`,
+      description: `List branches in the GitHub repository.`,
+    });
+    return this.#gatekeeper.listBranches(options?.resultsPerPage ?? 50);
+  }
+
+  async getBranch(name: string): Promise<import("./types").GitHubBranch> {
+    await this.#approvalQueue.authorizeObservation({
+      title: `Read branch ${name}`,
+      description: `Read information for branch ${name} in the GitHub repository.`,
+    });
+    return this.#gatekeeper.getBranch(name);
+  }
+
+  async readFile(path: string, ref?: string): Promise<import("./types").GitHubFileContent> {
+    await this.#approvalQueue.authorizeObservation({
+      title: `Read file ${path}`,
+      description: `Read file ${path} at ${ref ?? "the default branch"} in the GitHub repository.`,
+    });
+    return this.#gatekeeper.readFile(path, ref);
+  }
+
+  async createBranch(name: string, sha: string): Promise<import("./types").GitHubBranch> {
+    const action = await this.#gatekeeper.prepareCreateBranch(name, sha);
+    await this.#gatekeeper.submitActionForApproval(this.#approvalQueue, action, {
+      title: `Create branch ${name}`,
+      description: `Create branch ${name} pointing to ${sha}.`,
+      implementsRevert: false,
+    });
+    return { name, sha, url: "" };
+  }
+
+  async writeFile(options: import("./types").GitHubWriteFileOptions): Promise<import("./types").GitHubCommit> {
+    const action = await this.#gatekeeper.prepareWriteFile(options);
+    await this.#gatekeeper.submitActionForApproval(this.#approvalQueue, action, {
+      title: `Write file ${options.path}`,
+      description: `Write file ${options.path} in the GitHub repository.`,
+      implementsRevert: false,
+    });
+    return { sha: "", url: "" };
+  }
+
+  async deleteFile(options: import("./types").GitHubDeleteFileOptions): Promise<import("./types").GitHubCommit> {
+    const action = await this.#gatekeeper.prepareDeleteFile(options);
+    await this.#gatekeeper.submitActionForApproval(this.#approvalQueue, action, {
+      title: `Delete file ${options.path}`,
+      description: `Delete file ${options.path} from the GitHub repository.`,
+      implementsRevert: false,
+    });
+    return { sha: "", url: "" };
   }
 }
 

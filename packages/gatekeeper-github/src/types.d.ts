@@ -4,9 +4,6 @@
  * A GitHub repo is a Git repo *plus* issues, pull requests, etc.
  */
 export interface GitHubRepo {
-  // TODO: Add methods to access code. Maybe represent that as `GitRepository`. For now we only
-  //   expose issues and PRs.
-
   /** Returns basic metadata about the repository. */
   getMetadata(): Promise<GitHubRepoMetadata>;
 
@@ -73,6 +70,28 @@ export interface GitHubRepo {
    * string; the remaining fields are structured filters.
    */
   searchPullRequests(query: GitHubPullRequestSearch): Promise<Cursor<GitHubPullRequestSummary>>;
+
+  /** Lists branches in this repository. */
+  listBranches(options?: GitHubPageOptions): Promise<Cursor<GitHubBranch>>;
+
+  /** Gets a specific branch by name. */
+  getBranch(name: string): Promise<GitHubBranch>;
+
+  /** Creates a new branch from an existing SHA. */
+  createBranch(name: string, sha: string): Promise<GitHubBranch>;
+
+  /** Reads a file's content from the repository at a specific revision or branch. */
+  readFile(path: string, ref?: string): Promise<GitHubFileContent>;
+
+  /**
+   * Creates or updates a file in the repository.
+   *
+   * To update an existing file, you must provide its current `sha`.
+   */
+  writeFile(options: GitHubWriteFileOptions): Promise<GitHubCommit>;
+
+  /** Deletes a file in the repository. */
+  deleteFile(options: GitHubDeleteFileOptions): Promise<GitHubCommit>;
 }
 
 /** A single GitHub issue. */
@@ -480,3 +499,43 @@ export type GitHubPullRequestMergeOptions = {
    *  current HEAD doesn't match, preventing races with concurrent pushes. */
   expectedHeadSha?: string;
 }
+
+export type GitHubBranch = {
+  name: string;
+  sha: string;
+  url: string;
+};
+
+export type GitHubFileContent = {
+  path: string;
+  sha: string;
+  /** The file content encoded in Base64 */
+  contentBase64: string;
+};
+
+export type GitHubWriteFileOptions = {
+  path: string;
+  message: string;
+  /** The content to write, as a standard string */
+  content?: string;
+  /** Alternatively, provide base64 content for binary files */
+  contentBase64?: string;
+  /** The branch to commit to. Defaults to the repository's default branch. */
+  branch?: string;
+  /** The blob SHA of the file being replaced. Required for updating existing files. */
+  sha?: string;
+};
+
+export type GitHubDeleteFileOptions = {
+  path: string;
+  message: string;
+  /** The blob SHA of the file being deleted. */
+  sha: string;
+  /** The branch to commit to. Defaults to the repository's default branch. */
+  branch?: string;
+};
+
+export type GitHubCommit = {
+  sha: string;
+  url: string;
+};

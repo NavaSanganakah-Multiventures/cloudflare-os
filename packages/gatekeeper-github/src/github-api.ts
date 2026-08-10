@@ -139,6 +139,49 @@ export type GitHubCompareResponse = {
   files?: GitHubPullFileResponse[];
 };
 
+export type GitHubBranchResponse = {
+  name: string;
+  commit: {
+    sha: string;
+    url: string;
+  };
+  protected?: boolean;
+};
+
+export type GitHubContentResponse = {
+  type: string;
+  encoding: string;
+  size: number;
+  name: string;
+  path: string;
+  content?: string;
+  sha: string;
+  url: string;
+  git_url: string;
+  html_url: string;
+  download_url: string;
+};
+
+export type GitHubCommitResponse = {
+  content: GitHubContentResponse | null;
+  commit: {
+    sha: string;
+    url: string;
+    html_url: string;
+  };
+};
+
+export type GitHubRefResponse = {
+  ref: string;
+  node_id: string;
+  url: string;
+  object: {
+    type: string;
+    sha: string;
+    url: string;
+  };
+};
+
 export class GitHubApiError extends Error {
   status: number;
   details?: unknown;
@@ -1080,5 +1123,143 @@ export class GitHubApi {
       undefined,
       options,
     );
+  }
+
+  async listBranches(
+    owner: string,
+    repo: string,
+    perPage: number,
+    page: number,
+  ): Promise<GitHubBranchResponse[]> {
+    const result = await this.listBranchesConditional(owner, repo, perPage, page);
+    if (result.status === 304) {
+      throw new Error("GitHub unexpectedly returned 304 for an unconditional branch list request.");
+    }
+    return result.data;
+  }
+
+  async listBranchesConditional(
+    owner: string,
+    repo: string,
+    perPage: number,
+    page: number,
+    options: ConditionalRequestOptions = {},
+  ): Promise<ConditionalRequestResult<GitHubBranchResponse[]>> {
+    return await this.#conditionalGet<GitHubBranchResponse[]>(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches`,
+      { per_page: perPage, page },
+      options,
+    );
+  }
+
+  async getBranch(
+    owner: string,
+    repo: string,
+    branch: string,
+  ): Promise<GitHubBranchResponse> {
+    const result = await this.getBranchConditional(owner, repo, branch);
+    if (result.status === 304) {
+      throw new Error("GitHub unexpectedly returned 304 for an unconditional branch request.");
+    }
+    return result.data;
+  }
+
+  async getBranchConditional(
+    owner: string,
+    repo: string,
+    branch: string,
+    options: ConditionalRequestOptions = {},
+  ): Promise<ConditionalRequestResult<GitHubBranchResponse>> {
+    return await this.#conditionalGet<GitHubBranchResponse>(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches/${encodeURIComponent(branch)}`,
+      undefined,
+      options,
+    );
+  }
+
+  async createRef(
+    owner: string,
+    repo: string,
+    ref: string,
+    sha: string,
+  ): Promise<GitHubRefResponse> {
+    return (await this.#request<GitHubRefResponse>(
+      "POST",
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/refs`,
+      {
+        body: { ref, sha },
+      },
+    )).data;
+  }
+
+  async getContent(
+    owner: string,
+    repo: string,
+    path: string,
+    ref?: string,
+  ): Promise<GitHubContentResponse> {
+    const result = await this.getContentConditional(owner, repo, path, ref);
+    if (result.status === 304) {
+      throw new Error("GitHub unexpectedly returned 304 for an unconditional content request.");
+    }
+    return result.data;
+  }
+
+  async getContentConditional(
+    owner: string,
+    repo: string,
+    path: string,
+    ref?: string,
+    options: ConditionalRequestOptions = {},
+  ): Promise<ConditionalRequestResult<GitHubContentResponse>> {
+    return await this.#conditionalGet<GitHubContentResponse>(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${path.replace(/^\/+/, "")}`,
+      ref ? { ref } : undefined,
+      options,
+    );
+  }
+
+  async createOrUpdateFile(
+    owner: string,
+    repo: string,
+    path: string,
+    message: string,
+    content: string,
+    branch?: string,
+    sha?: string,
+  ): Promise<GitHubCommitResponse> {
+    return (await this.#request<GitHubCommitResponse>(
+      "PUT",
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${path.replace(/^\/+/, "")}`,
+      {
+        body: {
+          message,
+          content,
+          branch,
+          sha,
+        },
+      },
+    )).data;
+  }
+
+  async deleteFile(
+    owner: string,
+    repo: string,
+    path: string,
+    message: string,
+    sha: string,
+    branch?: string,
+  ): Promise<GitHubCommitResponse> {
+    return (await this.#request<GitHubCommitResponse>(
+      "DELETE",
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${path.replace(/^\/+/, "")}`,
+      {
+        body: {
+          message,
+          sha,
+          branch,
+        },
+      },
+    )).data;
   }
 }
