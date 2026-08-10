@@ -7,7 +7,7 @@
     "moduleResolution": "bundler",
     "jsx": "react",
     "jsxFactory": "h",
-    "types": ["./worker-configuration.d.ts", "node"],
+    "types": ["./worker-configuration.d.ts"],
     "outDir": "./dist",
     "declaration": true,
     "sourceMap": true,
